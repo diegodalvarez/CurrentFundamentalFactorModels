@@ -6,7 +6,11 @@ Created on Fri Jul 24 16:04:49 2026
 """
 
 import os
+import numpy as np
 import pandas as pd
+
+from tqdm import tqdm
+tqdm.pandas()
 
 class Quarterlizer:
     
@@ -15,11 +19,12 @@ class Quarterlizer:
         self.src_path   = os.getcwd()
         self.repo_path  = os.path.abspath(os.path.join(self.src_path, ".."))
         self.data_path  = os.path.join(self.repo_path, "data")
-        self.quart_path = os.path.join(self.data_path, "Quaterlyized")
+        self.db_path    = os.path.join(self.data_path, "DataBase")
+        self.quart_path = os.path.join(self.db_path, "Quarterlyized")
         
         if os.path.exists(self.quart_path) == False: 
             os.makedirs(self.quart_path)
-    
+            
     def _get_quarterly(
         self,
         df: pd.DataFrame,
@@ -93,7 +98,7 @@ class Quarterlizer:
             files    : list,
             verbose  : bool = True) -> None:
         
-        daily_path = os.path.join(self.data_path, path_name)
+        daily_path = os.path.join(self.data_path, "DataBase", path_name)
         
         if verbose: print("Running Quarterly-izer ")
         
@@ -148,19 +153,76 @@ class Quarterlizer:
         self._quarterlize("DailyData", "Daily", daily_files)
         self._quarterlize("QuarterlyData", "Quarterly", ["FundamentalEquityIndexData"])
         
-    def get_quarterly_returns(self) -> None:
+    def _get_quarterly_rtn(self, df: pd.DataFrame) -> pd.DataFrame: 
         
-        path = os.path.join(self.data_path, "DailyData", "DailyReturns.parquet")
-        display(pd.read_parquet(
-            path = path, engine = "pyarrow").
-            security.
-            drop_duplicates().
-            to_list())
+        df_out = (df
+                .sort_values("date")
+                .assign(cuml_rtn = lambda x: np.cumprod(1 + x.value) - 1)
+                .loc[lambda x: x.date == x.date.min()])
+        
+        return df_out
+        
+    def get_quarterly_returns(self, verbose: bool = True) -> None:
+        
+        path     = os.path.join(self.data_path, "DataBase", "DailyData")
+        idx_path = os.path.join(path, "DailyReturnsEquityIndexData.parquet")
+        etf_path = os.path.join(path, "DailyReturnsETFData.parquet")
+
+        idx_out_path = os.path.join(self.quart_path, "QuarterlyIndexReturns.parquet")
+        if os.path.exists(idx_out_path):
+            if verbose: print("Already have Index Data\n")
+            return None
+        
+        else: 
+
+            if verbose: print("Index Return Calculation")
+            df_idx = (pd
+                    .read_parquet(path = idx_path, engine = "pyarrow")
+                    [["date", "ticker", "value"]]
+                    .drop_duplicates()
+                    .assign(
+                        value   = lambda x: x.value / 100,
+                        quarter = lambda x: 
+                            x.date.dt.year.astype(str) + 
+                            "-Q" + 
+                            x.date.dt.quarter.astype(str),
+                        group_var = lambda x: x.ticker + "+" + x.quarter)                
+                    .groupby("group_var")
+                    .progress_apply(lambda group: self._get_quarterly_rtn(group))
+                    .reset_index(drop = True))
+                
+            if verbose: print("Saving data\n")
+            df_idx.to_parquet(path = idx_out_path, engine = "pyarrow")
+                
+        etf_out_path = os.path.join(self.quart_path, "QuarterlyETFReturns.parquet")
+        if os.path.exists(etf_out_path):
+            if verbose: print("Already have ETF Data\n")
+            return None
+        
+        else:
+        
+            if verbose: print("ETF Return Calculation")
+            df_etf = (pd
+                    .read_parquet(path = etf_path, engine = "pyarrow")
+                    .drop(columns = ["field"])
+                    .assign(
+                        value   = lambda x: x.value / 100,
+                        quarter = lambda x: 
+                            x.date.dt.year.astype(str) + 
+                            "-Q" + 
+                            x.date.dt.quarter.astype(str),
+                        group_var = lambda x: x.ticker + "+" + x.quarter)
+                    .groupby("group_var")
+                    .progress_apply(lambda group: self._get_quarterly_rtn(group))
+                    .reset_index(drop = True))
+            
+            if verbose: print("Saving data\n")
+            df_etf.to_parquet(path = etf_out_path, engine = "pyarrow")
         
 def main() -> None: 
         
     quarterlizer = Quarterlizer()
     quarterlizer.quarterlize()
-    #quarterlizer.get_quarterly_returns()
+    quarterlizer.get_quarterly_returns()
     
 if __name__ == "__main__": main()
