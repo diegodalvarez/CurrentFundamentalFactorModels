@@ -14,9 +14,13 @@ class DataCollection:
         self.src_path   = os.getcwd()
         self.repo_path  = os.path.abspath(os.path.join(self.src_path, ".."))
         self.data_path  = os.path.join(self.repo_path, "data")
-        self.raw_path   = os.path.join(self.data_path, "RawData")
-        self.daily_path = os.path.join(self.data_path, "DailyData")
-        self.quart_path = os.path.join(self.data_path, "QuarterlyData")
+        self.db_path    = os.path.join(self.data_path, "DataBase")
+        self.raw_path   = os.path.join(self.db_path, "RawData")
+        self.daily_path = os.path.join(self.db_path, "DailyData")
+        self.quart_path = os.path.join(self.db_path, "QuarterlyData")
+
+        if os.path.exists(self.db_path) == False and makedirs == True:
+            os.makedirs(self.db_path)
 
         if os.path.exists(self.data_path) == False and makedirs == True: 
             os.makedirs(self.data_path)
@@ -32,7 +36,7 @@ class DataCollection:
             
         self.start_date = dt.date(year = 1990, month = 1, day = 1)
         self.end_date   = dt.date(year = 2026, month = 7, day = 20)
-            
+        
     def get_raw_index_data(self, path: str, verbose: bool = True) -> None: 
         
         if verbose: 
@@ -85,7 +89,7 @@ class DataCollection:
         
         in_path  = os.path.join(path, "EquityETFs.parquet")
         out_path = os.path.join(self.raw_path, "RawETFData.parquet")
-        
+    
         if os.path.exists(out_path):
             if verbose: print("Already have data\n")
             return None
