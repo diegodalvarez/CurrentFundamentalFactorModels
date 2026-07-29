@@ -1,1 +1,2 @@
-# CurrentFundamentalFactorModels
+# Current Fundamental Factor Models
+This repo attempts to find daily statistically significant estimates for fundamnetal factors. The overall goal is to enhance fundamentally driven factor portfolios which rely on data such as EBIT, EBITDA, and others that are subject to a lag. 
