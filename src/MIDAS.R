@@ -6,18 +6,105 @@ library(midasr)
 library(lubridate)
 library(tidyverse)
 
+get_midas_regression <- function(df_combined, field, ticker, vol_target){
+  
+  fund_vals <- df_combined %>% 
+    select(quarter, diff_val) %>% 
+    distinct() %>% 
+    arrange(quarter) %>% 
+    pull(diff_val) %>% 
+    as.numeric()
+  
+  fund_lag <- df_combined %>% 
+    select(quarter, diff_val_lag) %>% 
+    distinct() %>% 
+    arrange(quarter) %>% 
+    pull(diff_val_lag) %>% 
+    as.numeric()
+  
+  rtn <- df_combined %>% 
+    group_by(quarter) %>% 
+    arrange(day) %>% 
+    ungroup() %>% 
+    arrange(quarter, day) %>% 
+    select(rtn_val) %>% 
+    pull() %>% 
+    as.numeric()
+  
+  midas_restricted <- midas_r(
+    formula = fund_vals ~ fund_lag + mls(rtn, 0:(n-1), n, nealmon),
+    start   = list(rtn = c(0, 0)))
+  
+  midas_unrestricted <- midas_u(
+    formula = fund_vals ~ fund_lag + mls(rtn, 0:(n-1), n))
+
+   return(list(
+     ticker       = ticker,
+     vol_target   = vol_target,
+     field        = field,
+     restricted   = midas_restricted,
+     unrestricted = midas_unrestricted))
+}
+
+get_predictions <- function(x, model, model_name){
+  
+  m <- x[[model]]
+  
+  tibble(
+    field      = x$field,
+    ticker     = x$ticker,
+    vol_target = x$vol_target,
+    model      = model_name,
+    actual     = fitted(m) + residuals(m),
+    fitted     = fitted(m),
+    residual   = residuals(m)
+  )
+}
+
+get_coefficients <- function(x, model, model_name){
+  
+  coef_table <- as.data.frame(summary(x[[model]])$coefficients)
+  
+  coef_table$term <- rownames(coef_table)
+  rownames(coef_table) <- NULL
+  
+  coef_table %>%
+    rename(
+      coeff = Estimate,
+      std_error = `Std. Error`,
+      t_value = `t value`,
+      p_value = `Pr(>|t|)`
+    ) %>%
+    mutate(
+      field = x$field,
+      ticker = x$ticker,
+      vol_target = x$vol_target,
+      model = model_name,
+      .before = 1
+    )
+}
+
 src_cwd    <- getwd()
 repo_path  <- dirname(src_cwd)
 data_path  <- file.path(repo_path, "data")
-base_path  <- file.path(data_path, "Models", "BaselineModels")
-db_path    <- file.path(data_path, "DataBase") 
+db_path    <- file.path(data_path, "DataBase")
+prep_path  <- file.path(db_path, "PrepData")
 daily_path <- file.path(db_path, "DailyData")
+model_path <- file.path(data_path, "Models")
+out_path   <- file.path(model_path, "MIDASModels")
+
+if(!dir.exists(out_path)){
+  dir.create(out_path, recursive = TRUE)}
+
 
 sample_tickers <- c("SPX Index", "NDX Index", "RTY Index")
 
-path <- file.path(db_path, "Quarterlyized", "QuarterlyFundamentalEquityIndexData.parquet")
+fundamental_path <- file.path(
+  db_path, 
+  "Quarterlyized", 
+  "QuarterlyFundamentalEquityIndexData.parquet")
 
-df_fundamental <- read_parquet(file = path) %>% 
+df_fundamental <- read_parquet(file = fundamental_path) %>% 
   filter(ticker %in% sample_tickers) %>% 
   filter(stat_method == "last") %>% 
   select(quarter, value, ticker, field) %>% 
@@ -25,79 +112,123 @@ df_fundamental <- read_parquet(file = path) %>%
   arrange(quarter) %>% 
   mutate(
     diff_val = value - lag(value),
-    diff_val_lag = lag(diff_val)
-  ) %>% 
+    diff_val_lag = lag(diff_val)) %>% 
   drop_na() %>% 
   ungroup()
 
-path   <- file.path(base_path, "VolTargetedReturns.parquet")
-df_rtn <- read_parquet(file = path) %>% 
+df_lag_quarter_mapper <- df_fundamental %>% 
+  select(quarter) %>% 
+  unique() %>% 
+  arrange(quarter) %>% 
+  mutate(lag_quarter = lag(quarter)) %>% 
+  drop_na()
+
+df_next_quarter_mapper <- df_fundamental %>% 
+  select(quarter) %>% 
+  unique() %>% 
+  arrange(quarter) %>% 
+  mutate(next_quarter = lead(quarter))
+
+rtn_path   <- file.path(prep_path, "VolTargetedReturns.parquet")
+df_raw_rtn <- read_parquet(file = rtn_path) %>% 
   filter(ticker %in% sample_tickers) %>% 
+  filter(vol_target != "lag_vol_rtn") %>% 
   arrange(ticker, date) %>% 
   group_by(ticker) %>% 
-  mutate(
-    quarter = paste0(year(date), "-Q", quarter(date)),
-    rtn_lag = lag(rtn_val)
-  ) %>% 
+  mutate(quarter = paste0(year(date), "-Q", quarter(date))) %>% 
   ungroup()
 
-df_fundamental_tmp <- df_fundamental %>% 
-  filter(ticker == min(ticker)) %>% 
-  filter(field == min(field)) %>% 
-  arrange(quarter) 
-  
-start_quarter <- df_fundamental_tmp %>% 
-  select(quarter) %>% 
-  filter(quarter == min(quarter)) %>% 
+n = df_raw_rtn %>% 
+  select(-c(rtn_val)) %>% 
+  filter(quarter != max(quarter)) %>% 
+  group_by(quarter, ticker, vol_target) %>% 
+  summarise(n = n()) %>% 
+  ungroup %>% 
+  filter(n == min(n)) %>% 
+  select(n) %>% 
+  unique() %>% 
   pull()
 
-end_quarter <- df_fundamental_tmp %>% 
-  select(quarter) %>% 
-  filter(quarter == max(quarter)) %>% 
-  pull()
-
-rtn <- df_rtn %>% 
-  mutate(quarter = paste0(year(date), "-Q", quarter(date))) %>% 
-  filter(ticker == min(ticker)) %>% 
-  filter(vol_target == min(vol_target)) %>% 
-  filter(start_quarter < quarter) %>% 
-  filter(quarter < end_quarter) %>% 
+df_sliced_rtn <- df_raw_rtn %>% 
+  group_by(ticker, vol_target, quarter) %>% 
   arrange(date) %>% 
-  select(rtn_lag) %>% 
-  pull()
-
-df_tmp_rtn <- df_rtn %>% 
-  mutate(quarter = paste0(year(date), "-Q", quarter(date))) %>% 
-  filter(ticker == min(ticker)) %>% 
-  filter(vol_target == min(vol_target)) %>% 
-  filter(start_quarter < quarter) %>% 
-  filter(quarter < end_quarter)
-
-min_count <- df_tmp_rtn %>% 
-  count(quarter) %>% 
-  pull(n) %>% 
-  min()
-
-rtn_lag <- df_tmp_rtn  %>% 
-  group_by(quarter) %>% 
-  slice_head(n = min_count) %>% 
+  mutate(day = 1:n()) %>% 
   ungroup() %>% 
-  select(rtn_lag) %>% 
-  pull()
+  filter(day <= n) %>% 
+  inner_join(df_next_quarter_mapper, by = c("quarter")) %>% 
+  select(-c(quarter)) %>% 
+  rename(
+    rtn_date = date, 
+    quarter  = next_quarter)
 
-fund_vals <- df_fundamental_tmp %>% 
-  filter(start_quarter < quarter) %>% 
-  filter(quarter < end_quarter) %>% 
-  arrange(quarter) %>% 
-  select(diff_val) %>% 
-  pull()
+df_combined <- df_fundamental %>% 
+  inner_join(df_sliced_rtn, by = c("quarter", "ticker"), relationship = "many-to-many")
+  
+results <- df_combined %>% 
+  group_by(field, ticker, vol_target) %>% 
+  group_map(~get_midas_regression(.x, .y$field, .y$ticker, .y$vol_target))
 
-model1 <- lm(fund_vals ~ mls(rtn_lag, k = 0:(min_count-1), m = min_count))
-model2 <- midas_u(fund_vals ~ mls(rtn_lag, k = 0:(min_count-1), m = min_count))
+model_results <- map_dfr(results, function(x) {
+  
+  restricted_aic <- AIC(x$restricted)
+  unrestricted_aic <- AIC(x$unrestricted)
+  
+  f <- fitted(x$restricted)
+  r <- residuals(x$restricted)
+  
+  restricted_r2 <- 
+    sum((f - mean(f))^2) /
+    (sum((f - mean(f))^2) + sum(r^2))
+  
+  unrestricted_r2 <- summary(x$unrestricted)$r.squared
+  
+  print(restricted_r2)
+  
+  tibble(
+    field             = x$field,
+    ticker            = x$ticker,
+    vol_target        = x$vol_target,
+    restricted_aic    = restricted_aic,
+    unrestricted_aic  = unrestricted_aic,
+    delta_aic         = unrestricted_aic - restricted_aic,
+    restricted_r2     = restricted_r2,
+    unrestricted_r2   = unrestricted_r2,
+  )
+})
 
-model3 <- midas_r(
-  formula = fund_vals ~ mls(rtn_lag, 0:(min_count-1), min_count, nealmon), 
-  start   = list(rtn_lag = c(1, -0.5)))
+predictions <- map_dfr(results, function(x) {
+  
+  bind_rows(
+    get_predictions(x, "restricted", "restricted"),
+    get_predictions(x, "unrestricted", "unrestricted")
+  )
+})
 
+coefficients <- map_dfr(results, function(x) {
+  
+  bind_rows(
+    get_coefficients(x, "restricted", "restricted"),
+    get_coefficients(x, "unrestricted", "unrestricted")
+  )
+})
 
+write_parquet(
+  model_results,
+  file.path(out_path, "MIDASResults.parquet")
+)
+
+write_parquet(
+  predictions,
+  file.path(out_path, "MIDASPredictions.parquet")
+)
+
+write_parquet(
+  coefficients,
+  file.path(out_path, "MIDASCoefficients.parquet")
+)
+
+saveRDS(
+  results,
+  file.path(out_path, "MIDASModels.rds")
+)
 

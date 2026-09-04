@@ -19,7 +19,9 @@ class OLSModels:
         df_params = (df_param_val
             .merge(right = df_pvalues, how = "inner", on = ["index"])
             .merge(right = df_tvalues, how = "inner", on = ["index"])
-            .assign(r2 = model.rsquared)
+            .assign(
+                adj_r2 = model.rsquared_adj, 
+                r2     = model.rsquared)
             .rename(columns = {"index": "param_name"}))
     
         return df_params
